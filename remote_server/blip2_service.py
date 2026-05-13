@@ -54,7 +54,7 @@ def score_candidates(image: Image.Image, captions: list[str]) -> list[float]:
     if not captions:
         return []
 
-    scores: list[float] = []
+    losses: list[float] = []
     for caption_batch in batched(captions, max(1, BATCH_SIZE)):
         clean_captions = [caption.strip() or "clothing product" for caption in caption_batch]
         images = [image] * len(clean_captions)
@@ -88,10 +88,20 @@ def score_candidates(image: Image.Image, captions: list[str]) -> list[float]:
             ).reshape(target.shape)
             sequence_loss = (token_loss * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
 
-        # Lower caption loss means a better image-text match. Convert to a bounded score.
-        scores.extend(torch.exp(-sequence_loss).detach().cpu().tolist())
+        # Lower caption loss means a better image-text match.
+        losses.extend(sequence_loss.detach().cpu().tolist())
 
-    return [float(score) for score in scores]
+    if len(losses) == 1:
+        return [1.0]
+
+    min_loss = min(losses)
+    max_loss = max(losses)
+    if max_loss == min_loss:
+        return [0.5 for _ in losses]
+
+    # Convert losses to relative 0..1 scores for this candidate set.
+    # Best caption gets 1.0, worst gets 0.0.
+    return [float((max_loss - loss) / (max_loss - min_loss)) for loss in losses]
 
 
 @app.get("/health")
