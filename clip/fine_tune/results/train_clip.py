@@ -34,7 +34,7 @@ LR             = 1e-5
 WEIGHT_DECAY   = 0.01
 WARMUP_EPOCHS  = 1
 TEMPERATURE    = 0.07
-SEED           = 42
+SEED           = int(os.environ.get("CLIP_SEED", 42))
 ALPHA          = 0.7
 P_ITEMS        = 16   # items per batch (BalancedBatchSampler)
 K_IMAGES       = 2    # images per item (BalancedBatchSampler)
@@ -429,8 +429,9 @@ def main():
                         "finetune_scope": FINETUNE_SCOPE,
                         "temperature"   : TEMPERATURE,
                         "alpha"         : ALPHA,
+                        "seed"          : SEED,
                     }
-                }, OUT_DIR / "clip_best.pt")
+                }, OUT_DIR / f"clip_best_seed{SEED}.pt")
                 print("  >>> Best checkpoint saved (val_loss:", round(val_loss, 4), ")")
 
             torch.save({
@@ -438,12 +439,13 @@ def main():
                 "model_state" : model.module.state_dict(),
                 "val_loss"    : val_loss,
                 "history"     : history,
-            }, OUT_DIR / "clip_latest.pt")
+            }, OUT_DIR / f"clip_latest_seed{SEED}.pt")
 
     if rank == 0:
         save_plots(history, OUT_DIR)
-        print("\nBest val loss:", round(best_val_loss, 4))
-        print("Checkpoint   :", OUT_DIR / "clip_best.pt")
+        print("\nSeed         :", SEED)
+        print("Best val loss:", round(best_val_loss, 4))
+        print("Checkpoint   :", OUT_DIR / f"clip_best_seed{SEED}.pt")
 
     dist.destroy_process_group()
 

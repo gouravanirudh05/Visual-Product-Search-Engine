@@ -218,3 +218,7 @@ __marimo__/
 
 /blip_captions/train/blip2_captions_train.csv
 /blip_captions/gallery/blip2_captions_gallery.csv
+
+# Notebook generator scripts
+create_batch_eval_notebook.py
+create_build_index_notebook.py
