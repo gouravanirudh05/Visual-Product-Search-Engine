@@ -8,6 +8,20 @@ For the full step-by-step version, see `docs/local_streamlit_kaggle_blip.md`.
 
 ```bash
 pip install -r requirements-blip2-server.txt
+pip install --no-deps salesforce-lavis
+```
+
+The remote service uses the same LAVIS BLIP-2 ITM scorer as `finetuned-multiseed-eval.ipynb` by default. Set these before launch:
+
+```bash
+export BLIP2_BACKEND="lavis_itm"
+export BLIP2_FINAL_SCORE_MODE="blip2"
+export BLIP2_BATCH_SIZE=16
+```
+
+Then start the service:
+
+```bash
 uvicorn remote_server.blip2_service:app --host 0.0.0.0 --port 8001
 ```
 
@@ -32,11 +46,12 @@ Set the project paths and service URLs first:
 export BLIP2_SERVER_URL="https://YOUR-BLIP2-SERVER.ngrok-free.app"
 export PINECONE_API_KEY="YOUR_KEY"
 export PINECONE_INDEX_NAME="vr-clothing-gallery"
-export PINECONE_NAMESPACE="finetuned-alpha-0.7"
 export GALLERY_CSV="/local/path/to/version_5/gallery.csv"
 export CAPTIONS_CSV="/local/path/to/version_5/blip2_captions_gallery.csv"
 export IMAGE_ROOT="/local/path/to/version_5"
-export CLIP_CHECKPOINT="/local/path/to/version_5/clip_best.pt"
+export FINETUNED_SEED="104"
+export FINETUNED_ALPHA="0.7"
+export CLIP_CHECKPOINT="/local/path/to/version_5/clip_best_seed104.pt"
 ```
 
 Install and run:

@@ -16,7 +16,8 @@ version_5/
   img/
   blip2_captions_gallery.csv
   blip2_captions_train.csv
-  clip_best.pt
+  clip_best_seed104.pt
+  clip_best_seed541.pt
   gallery.csv
   query.csv
   train.csv
@@ -36,18 +37,12 @@ In a Kaggle notebook with GPU enabled:
 git clone YOUR_REPO_URL
 cd Visual-Product-Search-Engine
 pip install -r requirements-blip2-server.txt
+pip install --no-deps salesforce-lavis
 ```
 
-Do not install or downgrade LAVIS/old Transformers for the demo server. The server uses HuggingFace Transformers BLIP-2, which works better with Kaggle Python 3.12.
+The server defaults to LAVIS `blip2_image_text_matching`, which is the same BLIP-2 ITM scorer used by `finetuned-multiseed-eval.ipynb`. Installing `salesforce-lavis` with `--no-deps` avoids pulling older dependency pins over the packages listed in `requirements-blip2-server.txt`.
 
-If you already tried the LAVIS fix and broke/downgraded Transformers, repair Kaggle with:
-
-```bash
-pip uninstall -y salesforce-lavis
-pip install -U "transformers>=4.41" accelerate sentencepiece
-```
-
-Then restart the Kaggle kernel before starting the server.
+Then restart the Kaggle kernel if you installed these packages after importing Python libraries.
 
 If you have an ngrok auth token, set it:
 
@@ -55,17 +50,18 @@ If you have an ngrok auth token, set it:
 export NGROK_AUTHTOKEN="YOUR_NGROK_TOKEN"
 ```
 
+Set the BLIP-2 backend before launch:
+
+```bash
+export BLIP2_BACKEND="lavis_itm"
+export BLIP2_FINAL_SCORE_MODE="blip2"
+export BLIP2_BATCH_SIZE=16
+```
+
 Start the BLIP-2 API and ngrok tunnel:
 
 ```bash
 python remote_server/run_blip2_ngrok.py
-```
-
-Optional memory controls for Kaggle T4:
-
-```bash
-export BLIP2_MODEL_ID="Salesforce/blip2-opt-2.7b"
-export BLIP2_BATCH_SIZE=2
 ```
 
 Copy the printed URL:
@@ -90,11 +86,12 @@ Edit `.env`:
 BLIP2_SERVER_URL=https://xxxx.ngrok-free.app
 PINECONE_API_KEY=YOUR_PINECONE_KEY
 PINECONE_INDEX_NAME=vr-clothing-gallery
-PINECONE_NAMESPACE=finetuned-alpha-0.7
 GALLERY_CSV=/absolute/path/to/version_5/gallery.csv
 CAPTIONS_CSV=/absolute/path/to/version_5/blip2_captions_gallery.csv
 IMAGE_ROOT=/absolute/path/to/version_5
-CLIP_CHECKPOINT=/absolute/path/to/version_5/clip_best.pt
+FINETUNED_SEED=104
+FINETUNED_ALPHA=0.7
+CLIP_CHECKPOINT=/absolute/path/to/version_5/clip_best_seed104.pt
 CANDIDATE_K=50
 BLIP2_RERANK_K=10
 BLIP2_TIMEOUT_SECONDS=180
@@ -130,6 +127,13 @@ http://localhost:8501
 4. The local app runs CLIP and Pinecone search.
 5. The local app sends only the cropped query image and candidate captions to the Kaggle BLIP-2 URL.
 6. Results are shown locally with CLIP, BLIP-2, and final scores.
+
+To switch to the other multi-seed run, change:
+
+```bash
+FINETUNED_SEED=541
+CLIP_CHECKPOINT=/absolute/path/to/version_5/clip_best_seed541.pt
+```
 
 The sidebar server check warms the BLIP-2 model on Kaggle. Run it once before the first search so the first re-rank request does not spend its timeout loading model weights.
 

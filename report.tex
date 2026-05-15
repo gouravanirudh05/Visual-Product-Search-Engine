@@ -1,0 +1,543 @@
+\documentclass[12pt, a4paper]{article}
+
+% -- Packages -----------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath, amssymb}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{titlesec}
+\usepackage{hyperref}
+
+\hypersetup{
+    breaklinks=true,
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    urlcolor=blue!70!black,
+    citecolor=blue!70!black
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!70!black}
+}
+
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{}{0em}{}
+
+\graphicspath{{overleaf_figures/}}
+
+\newcommand{\todo}[1]{\textcolor{red!70!black}{\textbf{[TODO: #1]}}}
+\newcommand{\placeholderfigure}[3]{
+    \begin{figure}[H]
+        \centering
+        \fbox{
+            \begin{minipage}[c][0.22\textheight][c]{0.86\textwidth}
+                \centering
+                \textbf{Placeholder Figure}\\[0.3cm]
+                #2
+            \end{minipage}
+        }
+        \caption{#1}
+        \label{#3}
+    \end{figure}
+}
+
+% =============================================================================
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    {\scshape\Large International Institute of Information Technology Bangalore\par}
+    \vspace{0.5cm}
+    {\scshape Visual Recognition --- AID 825\par}
+    \vspace{1.5cm}
+    \rule{\linewidth}{0.4pt}\\[0.4cm]
+    {\huge\bfseries Visual Product Search - Report\par}
+    \vspace{0.2cm}
+    \rule{\linewidth}{0.4pt}\\[1.5cm]
+    {\itshape Submitted by:\par}
+    \vspace{0.3cm}
+    {\large
+    Gourav Anirudh BJ (IMT2023005)\\
+    Sathish Adithiyaa SV (IMT2023030)\\
+    Subhash Hari (IMT2023104)\\
+    Vinay P Ramesh (IMT2023541)
+    \par}
+
+    \vspace{0.5cm}
+
+    {\itshape Project Resources:\par}
+    \vspace{0.2cm}
+    {\large
+    \textbf{GitHub Repository:} \url{https://github.com/gouravanirudh05/Visual-Product-Search-Engine}
+    \par}
+
+    \vfill
+        \begin{figure}[H]
+            \centering
+            \includegraphics[width=0.45\textwidth]{figures/IIIT-B-with name logo.jpg.jpeg}
+        \end{figure}
+    
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Abstract}
+
+This project implements an end-to-end visual product search engine for fashion retrieval. The system accepts a user query image, localizes the clothing product, encodes the query using CLIP, retrieves nearest catalog items from a vector index, and re-ranks the retrieved candidates using BLIP-2 based image-text matching. The project uses the DeepFashion In-Shop Clothes Retrieval dataset, where images sharing the same \texttt{item\_id} are treated as relevant matches. The final application is exposed through a Streamlit interface with crop confirmation, top-$K$ product display, metadata, and similarity scores.
+
+The report describes the motivation, dataset preparation, offline indexing pipeline, online retrieval pipeline, CLIP fine-tuning strategy, evaluation protocol, and ablation study design. Some multi-seed ablation results are still pending; these are marked as placeholders so that final plots and tables can be inserted after the remaining runs are completed.
+
+\section{Problem Motivation}
+
+Keyword-based e-commerce search depends heavily on product titles, tags, and seller-provided metadata. This is fragile in fashion search because users often remember visual attributes, while catalog metadata can be inconsistent. For example, two sellers may describe similar garments using different color, material, fit, or style words. This creates a language mismatch between user intent and catalog text.
+
+The goal of this project is to support query-by-image retrieval. A user uploads an image of a clothing item, and the system returns catalog products that are visually and semantically similar. This setting is useful when the user has a product photo but does not know the exact product name or search keywords.
+
+\section{Dataset}
+
+We use the DeepFashion In-Shop Clothes Retrieval dataset. The dataset is organized into train, query, and gallery splits. Each image has an \texttt{item\_id}; two images are considered a correct retrieval match if and only if they share the same \texttt{item\_id}.
+
+\begin{table}[H]
+    \centering
+    \caption{Dataset split summary used in the project. Counts exclude CSV headers.}
+    \label{tab:dataset-summary}
+    \begin{tabular}{lrrl}
+        \toprule
+        Split & Images & Unique Items & Role \\
+        \midrule
+        Train & 25,882 & 3,997 & CLIP fine-tuning \\
+        Query & 14,218 & 3,985 & Retrieval evaluation inputs \\
+        Gallery & 12,612 & 3,985 & Search database/index \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For semantic enrichment, BLIP-2 captions are generated for train and gallery images. These captions are used in two places: first, to create fused image-text gallery vectors during offline indexing; second, to provide candidate captions for BLIP-2 re-ranking during online retrieval.
+
+\section{System Architecture}
+
+The complete system is split into an offline indexing pipeline and an online query pipeline. Figure~\ref{fig:architecture-system} shows the complete end-to-end design.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/architecture_system.png}
+    \caption{Overall architecture of the visual product search system.}
+    \label{fig:architecture-system}
+\end{figure}
+
+\subsection{Offline Indexing}
+
+For every gallery image, the offline pipeline prepares a searchable representation:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/architecture_offline_indexing.png}
+    \caption{Offline gallery indexing pipeline.}
+    \label{fig:architecture-offline}
+\end{figure}
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Product localization.} A YOLO detector is used to crop the primary product region and reduce background noise.
+    \item \textbf{Caption generation.} BLIP-2 generates a natural-language caption for the product image. The caption improves semantic consistency in cases where visual similarity alone is ambiguous.
+    \item \textbf{CLIP encoding.} The cropped image and the caption are embedded using CLIP's visual and text encoders.
+    \item \textbf{Feature fusion.} The image and text embeddings are combined using a weighted fusion parameter $\alpha$:
+    \begin{equation}
+        \mathbf{v}_i =
+        \frac{
+            \alpha \phi_V(\hat{x}_i) + (1-\alpha)\phi_T(c_i)
+        }{
+            \left\|\alpha \phi_V(\hat{x}_i) + (1-\alpha)\phi_T(c_i)\right\|_2
+        },
+        \label{eq:fusion}
+    \end{equation}
+    where $\hat{x}_i$ is the cropped product image, $c_i$ is the generated caption, $\phi_V$ is the CLIP visual encoder, and $\phi_T$ is the CLIP text encoder.
+    \item \textbf{Vector indexing.} The fused vectors and metadata are stored in Pinecone. Different ablation configurations are separated using namespaces.
+\end{enumerate}
+
+\subsection{Online Retrieval}
+
+At query time, the system performs:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/architecture_online_retrieval.png}
+    \caption{Online query and BLIP-2 re-ranking pipeline.}
+    \label{fig:architecture-online}
+\end{figure}
+
+\begin{enumerate}[leftmargin=*]
+    \item The user uploads an image in the Streamlit application.
+    \item YOLO crops the likely product region. The user can confirm the crop or manually re-crop before search proceeds.
+    \item The confirmed crop is encoded using CLIP's visual encoder.
+    \item Pinecone returns the top candidate gallery items using cosine similarity.
+    \item BLIP-2 scores the query image against the candidate captions for semantic re-ranking.
+    \item The app displays the final ranked list with product images, metadata, CLIP score, BLIP-2 score, and final score.
+\end{enumerate}
+
+The final score used in the demo combines CLIP retrieval similarity and BLIP-2 image-text score:
+\begin{equation}
+    s_{\text{final}} = \lambda s_{\text{CLIP}} + (1-\lambda)s_{\text{BLIP-2}},
+    \label{eq:final-score}
+\end{equation}
+where $\lambda=0.7$ in the current implementation.
+
+\section{Model Components}
+
+\subsection{YOLO Product Localization}
+
+YOLO is used as a model-agnostic detection component. In the Streamlit app, \texttt{yolov8n.pt} can be used when the Ultralytics dependency is installed. If the detector is unavailable or returns no bounding box, the app falls back to a center crop and still allows manual crop adjustment.
+
+\subsection{BLIP-2 Captioning and Re-ranking}
+
+BLIP-2 is used in two roles. Offline, it produces product captions for gallery images. Online, it runs as a separate GPU-backed service and computes an image-text compatibility score between the query crop and candidate captions. This design keeps the Streamlit app lightweight on a local laptop while allowing the heavier BLIP-2 model to run on Kaggle GPU through an ngrok-exposed FastAPI service.
+
+The BLIP-2 service uses \texttt{Salesforce/blip2-opt-2.7b} in the current setup. The re-ranking pass is applied only to the top candidates returned by CLIP/Pinecone to control latency.
+
+\subsection{CLIP Retrieval Backbone}
+
+The retrieval backbone is CLIP ViT-L/14 with OpenAI pretrained weights. The gallery image and caption embeddings are normalized and fused for indexing. Query images are encoded using the CLIP visual encoder only, because the online input is an image.
+
+\section{CLIP Fine-Tuning Strategy}
+
+Only CLIP is fine-tuned. YOLO and BLIP-2 remain frozen. The fine-tuning objective is to move images with the same \texttt{item\_id} closer in embedding space and push images from different products farther apart.
+
+\subsection{Training Setup}
+
+The fine-tuning script uses:
+
+\begin{table}[H]
+    \centering
+    \caption{CLIP fine-tuning configuration.}
+    \label{tab:training-config}
+    \begin{tabular}{ll}
+        \toprule
+        Component & Value \\
+        \midrule
+        CLIP model & ViT-L/14 \\
+        Pretraining & OpenAI \\
+        Fine-tuning scope & Full visual encoder \\
+        Frozen modules & CLIP text encoder, BLIP-2, YOLO \\
+        Epochs & 10 \\
+        Batch size & 64 total across GPUs \\
+        Optimizer & AdamW \\
+        Learning rate & $1\times10^{-5}$ \\
+        Weight decay & 0.01 \\
+        Scheduler & Warmup + cosine decay \\
+        Loss & Supervised NT-Xent over item IDs \\
+        Temperature & 0.07 \\
+        Balanced batch & 16 items $\times$ 2 images per item \\
+        Validation split & 10\% by item ID \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Loss Function}
+
+Let $\mathbf{z}_i$ be the normalized CLIP image embedding for sample $i$. Positive samples are images with the same \texttt{item\_id}. The supervised NT-Xent objective maximizes similarity between positives and minimizes similarity against other images in the batch:
+
+\begin{equation}
+    \mathcal{L}_i =
+    -\frac{1}{|P(i)|}
+    \sum_{p \in P(i)}
+    \log
+    \frac{
+        \exp(\mathbf{z}_i^\top \mathbf{z}_p / \tau)
+    }{
+        \sum_{a \neq i} \exp(\mathbf{z}_i^\top \mathbf{z}_a / \tau)
+    },
+    \label{eq:ntxent}
+\end{equation}
+where $P(i)$ is the set of positive examples for anchor $i$ and $\tau$ is the temperature.
+
+\subsection{Training Curves}
+
+Seed 42 and seed 5 fine-tuning artifacts are currently available. The remaining seeds and final ablation plots will be filled after the pending runs.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \centering
+            \includegraphics[width=\linewidth]{figures/training_loss_seed42.png}
+        \caption{Seed 42 training and validation loss.}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \centering
+            \includegraphics[width=\linewidth]{figures/training_loss_seed05.png}
+        \caption{Seed 5 training and validation loss.}
+    \end{subfigure}
+    \caption{Available CLIP fine-tuning loss curves.}
+    \label{fig:training-loss}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \caption{Available CLIP fine-tuning summary. Additional seed rows can be added after completion.}
+    \label{tab:training-summary}
+    \begin{tabular}{lrrrr}
+        \toprule
+        Seed & Best Epoch & Best Val Loss & Final Train Loss & Final Val Loss \\
+        \midrule
+        42 & 7 & 1.4122 & 0.0250 & 1.4262 \\
+        5 & 6 & 1.5130 & 0.0217 & 1.5327 \\
+        \todo{Seed TBD} & \todo{-} & \todo{-} & \todo{-} & \todo{-} \\
+        \todo{Seed TBD} & \todo{-} & \todo{-} & \todo{-} & \todo{-} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Evaluation Protocol}
+
+The retrieval task is evaluated on query images against the gallery index. A retrieval is relevant if the returned gallery image has the same \texttt{item\_id} as the query.
+
+\subsection{Metrics}
+
+We report all metrics at $K \in \{5, 10, 15\}$.
+
+\textbf{Recall@K} measures whether at least one relevant item appears in the top-$K$ list:
+\begin{equation}
+    \text{Recall@K} =
+    \frac{1}{|Q|}
+    \sum_{q \in Q}
+    \mathbb{I}
+    \left[
+        \exists r \in R_q^K:
+        \texttt{item\_id}(r) = \texttt{item\_id}(q)
+    \right].
+\end{equation}
+
+\textbf{NDCG@K} rewards correct matches appearing earlier in the ranked list:
+\begin{equation}
+    \text{NDCG@K} =
+    \frac{\text{DCG@K}}{\text{IDCG@K}},
+    \quad
+    \text{DCG@K} =
+    \sum_{j=1}^{K}
+    \frac{2^{rel_j}-1}{\log_2(j+1)}.
+\end{equation}
+
+\textbf{mAP@K} averages precision at the ranks where relevant products appear:
+\begin{equation}
+    \text{AP@K}(q) =
+    \frac{1}{\min(m_q, K)}
+    \sum_{j=1}^{K}
+    P_q(j) \cdot rel_j,
+    \quad
+    \text{mAP@K} =
+    \frac{1}{|Q|}\sum_{q \in Q}\text{AP@K}(q),
+\end{equation}
+where $m_q$ is the number of relevant gallery images for query $q$.
+
+\section{Ablation Study Design}
+
+The ablation study isolates the effect of caption fusion and fine-tuning. All configurations use the same dataset split, vector dimension, top-$K$ evaluation protocol, and Pinecone ANN setup. The index namespaces separate configurations so that experiments remain reproducible.
+
+\begin{table}[H]
+    \centering
+    \caption{Ablation configurations.}
+    \label{tab:ablation-configs}
+    \begin{tabular}{clll}
+        \toprule
+        ID & Configuration & Namespace Pattern & Purpose \\
+        \midrule
+        A & Vision-only frozen CLIP, $\alpha=1.0$ & \texttt{frozen-alpha-1.0} & Baseline without caption fusion or fine-tuning \\
+        B1 & Frozen CLIP + BLIP-2 captions, $\alpha=0.7$ & \texttt{frozen-alpha-0.7} & Caption fusion with higher image weight \\
+        B2 & Frozen CLIP + BLIP-2 captions, $\alpha=0.5$ & \texttt{frozen-alpha-0.5} & Equal image-text fusion \\
+        C1 & Fine-tuned CLIP + BLIP-2 captions, $\alpha=0.7$ & \texttt{finetuned-alpha-0.7} & Fine-tuning plus caption fusion \\
+        C2 & Fine-tuned CLIP + BLIP-2 captions, $\alpha=0.5$ & \texttt{finetuned-alpha-0.5} & Fine-tuning with stronger text contribution \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For additional seeds, namespaces should be prefixed by the seed, for example \texttt{seed05-finetuned-alpha-0.7}. This avoids overwriting earlier Pinecone namespaces while staying within the serverless index limit.
+
+\section{Experimental Results}
+
+\subsection{Single-Seed Available Result}
+
+The currently available result image for seed 42 is included below if present. Replace this figure with the final cleaned plot/table once all seeds are complete.
+
+\begin{figure}[H]
+    \centering
+    \
+        \includegraphics[width=0.95\linewidth]{figures/ablation_seed42.jpeg}
+    \caption{Seed 42 ablation result}
+    \label{fig:seed42-ablation}
+\end{figure}
+
+\subsection{Final Multi-Seed Metric Table}
+
+\begin{table}[H]
+    \centering
+    \caption{Final ablation results over multiple seeds. Fill with mean $\pm$ standard deviation after all seeds are evaluated.}
+    \label{tab:final-results-placeholder}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lccccccccc}
+        \toprule
+        \multirow{2}{*}{Configuration} &
+        \multicolumn{3}{c}{Recall@K} &
+        \multicolumn{3}{c}{NDCG@K} &
+        \multicolumn{3}{c}{mAP@K} \\
+        \cmidrule(lr){2-4}
+        \cmidrule(lr){5-7}
+        \cmidrule(lr){8-10}
+        & @5 & @10 & @15 & @5 & @10 & @15 & @5 & @10 & @15 \\
+        \midrule
+        A: Frozen CLIP, $\alpha=1.0$ & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} \\
+        B1: Frozen CLIP + BLIP-2, $\alpha=0.7$ & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} \\
+        B2: Frozen CLIP + BLIP-2, $\alpha=0.5$ & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} \\
+        C1: Fine-tuned CLIP + BLIP-2, $\alpha=0.7$ & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} \\
+        C2: Fine-tuned CLIP + BLIP-2, $\alpha=0.5$ & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} & \todo{--} \\
+        \bottomrule
+    \end{tabular}}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{placeholder_recall_at_k.png}
+    \caption{Final Recall@K comparison across ablation settings. Replace after final multi-seed evaluation.}
+    \label{fig:recall-placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{placeholder_ndcg_at_k.png}
+    \caption{Final NDCG@K comparison across ablation settings. Replace after final multi-seed evaluation.}
+    \label{fig:ndcg-placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{placeholder_map_at_k.png}
+    \caption{Final mAP@K comparison across ablation settings. Replace after final multi-seed evaluation.}
+    \label{fig:map-placeholder}
+\end{figure}
+
+\subsection{Expected Analysis To Complete After Remaining Seeds}
+
+\begin{itemize}[leftmargin=*]
+    \item Compare A versus B to quantify the gain from BLIP-2 caption fusion without CLIP fine-tuning.
+    \item Compare B versus C to quantify the improvement from supervised CLIP visual fine-tuning.
+    \item Compare $\alpha=0.7$ and $\alpha=0.5$ to determine whether retrieval benefits more from image-dominant or balanced image-text fusion.
+    \item Report whether the improvement is consistent across Recall@K, NDCG@K, and mAP@K.
+    \item Discuss variance over seeds, especially if the fine-tuned model improves early-rank metrics but has higher standard deviation.
+\end{itemize}
+
+\section{Interactive Demo Application}
+
+The Streamlit application implements the required end-to-end demo flow:
+
+\begin{enumerate}[leftmargin=*]
+    \item User uploads a query image.
+    \item The application runs YOLO and displays the cropped product.
+    \item The user confirms the crop or switches to manual re-cropping.
+    \item After confirmation, CLIP encodes the crop and queries Pinecone.
+    \item Top candidates are sent to the remote BLIP-2 service for re-ranking.
+    \item The final retrieved products are shown with product image, \texttt{item\_id}, image path, caption, CLIP score, BLIP-2 score, and final score.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{placeholder_demo_crop.png}
+    \caption{Streamlit demo screenshot: upload and crop confirmation. Replace with final screenshot.}
+    \label{fig:demo-crop-placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{placeholder_demo_results.png}
+    \caption{Streamlit demo screenshot: retrieved product results. Replace with final screenshot.}
+    \label{fig:demo-results-placeholder}
+\end{figure}
+
+\section{Batch Evaluation Script}
+
+The batch evaluation script is intended to run the retrieval pipeline over a folder or CSV of query images and compute Recall@K, NDCG@K, and mAP@K for $K \in \{5,10,15\}$. The best-performing namespace from the ablation study should be selected for the final submission.
+
+\begin{lstlisting}[language=bash, caption={Placeholder command for final batch evaluation. Update paths and namespace before submission.}]
+python scripts/evaluate.py \
+  --query-csv /path/to/query.csv \
+  --gallery-csv /path/to/gallery.csv \
+  --image-root /path/to/version_5 \
+  --pinecone-index vr-clothing-gallery \
+  --namespace seed05-finetuned-alpha-0.7 \
+  --k 5 10 15
+\end{lstlisting}
+
+\todo{Replace the command above with the exact final batch evaluation command used in the repository/notebook. Add the produced CSV/JSON output path here.}
+
+\section{Implementation Notes}
+
+\begin{itemize}[leftmargin=*]
+    \item Pinecone serverless index limit was handled by storing different model variants in separate namespaces within the same index.
+    \item For seed 5, the checkpoint should be loaded from \texttt{clip\_seed05.pt}, and app configuration should use \texttt{PINECONE\_NAMESPACE=seed05-finetuned-alpha-0.7} or the final chosen namespace.
+    \item The CLIP checkpoint loader supports checkpoints saved with keys such as \texttt{model\_state}, \texttt{model\_state\_dict}, or \texttt{state\_dict}.
+    \item BLIP-2 re-ranking is run only for the top candidates to keep the demo responsive on Kaggle GPU.
+    \item The BLIP-2 score is bounded away from exact zero in the current service to avoid displaying misleading hard-zero endpoint scores caused by min-max normalization within a candidate batch.
+\end{itemize}
+
+\section{Limitations}
+
+\begin{itemize}[leftmargin=*]
+    \item BLIP-2 re-ranking increases latency, so only a subset of candidates is re-ranked online.
+    \item The quality of retrieval depends on crop quality. Incorrect YOLO detections can reduce performance, although manual crop correction helps in the demo.
+    \item Caption fusion may help with semantic attributes but can also introduce noise if generated captions miss fine-grained visual details.
+    \item Current multi-seed ablation results are incomplete and must be filled before final submission.
+\end{itemize}
+
+\section{Conclusion}
+
+This project builds a complete visual product search pipeline using YOLO for product localization, BLIP-2 for semantic captions and re-ranking, CLIP for cross-modal retrieval, and Pinecone for fast ANN search. The Streamlit interface demonstrates the full query flow with crop confirmation and ranked product display. Initial fine-tuning artifacts show that the CLIP visual encoder was successfully trained with a supervised contrastive objective over product IDs. The final report will be completed by inserting the remaining seed ablation metrics, result plots, and demo screenshots.
+
+\begin{thebibliography}{9}
+
+\bibitem{deepfashion}
+Z. Liu, P. Luo, S. Qiu, X. Wang, and X. Tang.
+\textit{DeepFashion: Powering Robust Clothes Recognition and Retrieval with Rich Annotations}.
+CVPR, 2016.
+
+\bibitem{clip}
+A. Radford et al.
+\textit{Learning Transferable Visual Models From Natural Language Supervision}.
+ICML, 2021.
+
+\bibitem{blip2}
+J. Li et al.
+\textit{BLIP-2: Bootstrapping Language-Image Pre-training with Frozen Image Encoders and Large Language Models}.
+ICML, 2023.
+
+\bibitem{yolo}
+J. Redmon et al.
+\textit{You Only Look Once: Unified, Real-Time Object Detection}.
+CVPR, 2016.
+
+\bibitem{hnsw}
+Y. A. Malkov and D. A. Yashunin.
+\textit{Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs}.
+IEEE TPAMI, 2020.
+
+\end{thebibliography}
+
+\end{document}

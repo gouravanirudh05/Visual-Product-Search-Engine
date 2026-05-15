@@ -1,4 +1,5 @@
 streamlit
+streamlit-cropper
 requests
 pillow
 pandas

@@ -4,6 +4,7 @@ torchvision
 
 --index-url https://pypi.org/simple
 streamlit
+streamlit-cropper
 requests
 pillow
 pandas

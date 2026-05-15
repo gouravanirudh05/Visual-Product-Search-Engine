@@ -4,6 +4,16 @@ python-multipart
 torch
 pillow
 pyngrok
-transformers>=4.41
+# LAVIS itself should be installed with:
+# pip install --no-deps salesforce-lavis
+omegaconf
+timm
+fairscale
+iopath
+decord
+webdataset
+pycocotools
+pycocoevalcap
+transformers==4.38.2
 accelerate
 sentencepiece

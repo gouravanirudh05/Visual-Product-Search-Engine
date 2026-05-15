@@ -3,7 +3,8 @@ from __future__ import annotations
 import io
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,18 @@ import pandas as pd
 import requests
 import streamlit as st
 from PIL import Image, ImageOps
+from streamlit_cropper import st_cropper
 
 
 APP_TITLE = "Visual Product Search Engine"
 DEFAULT_INDEX_NAME = "vr-clothing-gallery"
-DEFAULT_NAMESPACE = "finetuned-alpha-0.7"
+SUPPORTED_FINETUNED_SEEDS = ("104", "541")
+SUPPORTED_FINETUNED_ALPHAS = ("0.7", "0.5")
+DEFAULT_FINETUNED_SEED = "104"
+DEFAULT_FINETUNED_ALPHA = "0.7"
+DEFAULT_NAMESPACE = f"finetuned-alpha-{DEFAULT_FINETUNED_ALPHA}-seed{DEFAULT_FINETUNED_SEED}"
+SEED_NAMESPACE_PATTERN = re.compile(r"^finetuned-alpha-(?P<alpha>\d+(?:\.\d+)?)-seed(?P<seed>\d+)$")
+CHECKPOINT_SEED_PATTERN = re.compile(r"seed(?P<seed>\d+)", re.IGNORECASE)
 NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
 BLIP2_SCORE_FLOOR = 0.05
 
@@ -27,6 +35,8 @@ class Settings:
     pinecone_api_key: str
     pinecone_index_name: str
     pinecone_namespace: str
+    finetuned_seed: str
+    finetuned_alpha: str
     gallery_csv: str
     captions_csv: str
     image_root: str
@@ -45,6 +55,30 @@ def env_int(name: str, default: int) -> int:
         return int(os.getenv(name, default))
     except ValueError:
         return default
+
+
+def normalize_seed(raw_seed: str | None) -> str:
+    seed = str(raw_seed or "").strip()
+    return seed if seed in SUPPORTED_FINETUNED_SEEDS else DEFAULT_FINETUNED_SEED
+
+
+def normalize_alpha(raw_alpha: str | None) -> str:
+    alpha = str(raw_alpha or "").strip()
+    return alpha if alpha in SUPPORTED_FINETUNED_ALPHAS else DEFAULT_FINETUNED_ALPHA
+
+
+def format_seed_namespace(seed: str, alpha: str) -> str:
+    return f"finetuned-alpha-{alpha}-seed{seed}"
+
+
+def parse_seed_namespace(namespace: str) -> dict[str, str] | None:
+    match = SEED_NAMESPACE_PATTERN.fullmatch(namespace.strip())
+    if not match:
+        return None
+    return {
+        "seed": match.group("seed"),
+        "alpha": match.group("alpha"),
+    }
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -68,12 +102,14 @@ def load_settings() -> Settings:
         blip2_server_url=os.getenv("BLIP2_SERVER_URL", "").rstrip("/"),
         pinecone_api_key=os.getenv("PINECONE_API_KEY", ""),
         pinecone_index_name=os.getenv("PINECONE_INDEX_NAME", DEFAULT_INDEX_NAME),
-        pinecone_namespace=os.getenv("PINECONE_NAMESPACE", DEFAULT_NAMESPACE),
+        pinecone_namespace=os.getenv("PINECONE_NAMESPACE", "").strip(),
+        finetuned_seed=normalize_seed(os.getenv("FINETUNED_SEED", DEFAULT_FINETUNED_SEED)),
+        finetuned_alpha=normalize_alpha(os.getenv("FINETUNED_ALPHA", DEFAULT_FINETUNED_ALPHA)),
         gallery_csv=os.getenv("GALLERY_CSV", ""),
         captions_csv=os.getenv("CAPTIONS_CSV", ""),
         image_root=os.getenv("IMAGE_ROOT", ""),
         yolo_model_path=os.getenv("YOLO_MODEL_PATH", "yolov8n.pt"),
-        clip_checkpoint=os.getenv("CLIP_CHECKPOINT", ""),
+        clip_checkpoint=os.getenv("CLIP_CHECKPOINT", "").strip(),
         clip_model=os.getenv("CLIP_MODEL", "ViT-L-14"),
         clip_pretrained=os.getenv("CLIP_PRETRAINED", "openai"),
         candidate_k=env_int("CANDIDATE_K", 50),
@@ -89,6 +125,18 @@ def to_png_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def raise_for_status_with_detail(response: requests.Response) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        detail = payload.get("detail") or response.text
+        raise RuntimeError(f"{response.status_code}: {detail}") from exc
+
+
 def normalize_image(image: Image.Image) -> Image.Image:
     return ImageOps.exif_transpose(image).convert("RGB")
 
@@ -102,18 +150,8 @@ def center_crop(image: Image.Image) -> Image.Image:
 
 
 def manual_crop_controls(image: Image.Image) -> Image.Image:
-    width, height = image.size
-    st.write("Manual crop")
-    col_a, col_b = st.columns(2)
-    x1 = col_a.slider("Left", 0, max(width - 1, 1), 0)
-    x2 = col_a.slider("Right", 1, width, width)
-    y1 = col_b.slider("Top", 0, max(height - 1, 1), 0)
-    y2 = col_b.slider("Bottom", 1, height, height)
-    if x2 <= x1:
-        x2 = min(width, x1 + 1)
-    if y2 <= y1:
-        y2 = min(height, y1 + 1)
-    return image.crop((x1, y1, x2, y2))
+    # Removed in favor of streamlit_cropper
+    return center_crop(image)
 
 
 @st.cache_resource(show_spinner=False)
@@ -126,18 +164,18 @@ def load_yolo(model_path: str):
         return exc
 
 
-def crop_with_yolo(image: Image.Image, model_path: str) -> tuple[Image.Image, str]:
+def crop_with_yolo(image: Image.Image, model_path: str) -> tuple[tuple[int, int, int, int] | None, str]:
     if not model_path:
-        return center_crop(image), "YOLO disabled. Using center crop; enable manual crop if needed."
+        return None, "YOLO disabled. Enable manual crop if needed."
 
     model = load_yolo(model_path)
     if isinstance(model, Exception):
-        return center_crop(image), f"YOLO unavailable ({model}). Using center crop."
+        return None, f"YOLO unavailable ({model}). Using full image."
 
     results = model.predict(image, verbose=False)
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
-        return center_crop(image), "No YOLO box found. Using center crop."
+        return None, "No YOLO box found. Using full image."
 
     areas = []
     for box in boxes.xyxy.cpu().numpy():
@@ -148,13 +186,15 @@ def crop_with_yolo(image: Image.Image, model_path: str) -> tuple[Image.Image, st
     width, height = image.size
     pad_x = 0.04 * (x2 - x1)
     pad_y = 0.04 * (y2 - y1)
+    
+    # st_cropper expects (left, right, top, bottom)
     box = (
         max(0, int(x1 - pad_x)),
-        max(0, int(y1 - pad_y)),
         min(width, int(x2 + pad_x)),
+        max(0, int(y1 - pad_y)),
         min(height, int(y2 + pad_y)),
     )
-    return image.crop(box), "YOLO crop selected from the largest detected product region."
+    return box, "YOLO crop selected from the largest detected product region."
 
 
 @st.cache_resource(show_spinner=False)
@@ -167,8 +207,14 @@ def load_clip(model_name: str, pretrained: str, checkpoint_path: str):
         model_name,
         pretrained=pretrained,
     )
-    if checkpoint_path and Path(checkpoint_path).exists():
-        state = torch.load(checkpoint_path, map_location=device)
+    if checkpoint_path:
+        checkpoint = Path(checkpoint_path).expanduser()
+        if not checkpoint.exists():
+            raise FileNotFoundError(
+                f"CLIP checkpoint not found: {checkpoint}. "
+                "Set CLIP_CHECKPOINT explicitly or make sure the seed-specific file is available locally."
+            )
+        state = torch.load(checkpoint, map_location=device)
         if isinstance(state, dict):
             state = (
                 state.get("model_state_dict")
@@ -180,6 +226,110 @@ def load_clip(model_name: str, pretrained: str, checkpoint_path: str):
         model.load_state_dict(state, strict=False)
     model.to(device).eval()
     return model, preprocess, device
+
+
+def candidate_config_roots(settings: Settings) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in (
+        settings.image_root,
+        settings.gallery_csv,
+        settings.captions_csv,
+        settings.clip_checkpoint,
+    ):
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        root = path if path.is_dir() else path.parent
+        if root not in seen:
+            roots.append(root)
+            seen.add(root)
+    for root in (Path.cwd(), Path.cwd() / "archive"):
+        if root not in seen:
+            roots.append(root)
+            seen.add(root)
+    return roots
+
+
+def remap_checkpoint_for_seed(checkpoint_path: str, seed: str) -> str | None:
+    path = Path(checkpoint_path).expanduser()
+    if not CHECKPOINT_SEED_PATTERN.search(path.name):
+        return None
+    remapped_name = CHECKPOINT_SEED_PATTERN.sub(f"seed{seed}", path.name, count=1)
+    return str(path.with_name(remapped_name))
+
+
+def resolve_clip_checkpoint(settings: Settings, namespace: str) -> str:
+    namespace_bits = parse_seed_namespace(namespace)
+    if settings.clip_checkpoint:
+        if namespace_bits:
+            remapped = remap_checkpoint_for_seed(settings.clip_checkpoint, namespace_bits["seed"])
+            if remapped:
+                return remapped
+        return settings.clip_checkpoint
+
+    if not namespace_bits:
+        return ""
+
+    seed = namespace_bits["seed"]
+    checkpoint_names = (
+        f"clip_best_seed{seed}.pt",
+        f"clip_seed_{seed}.pt",
+        f"clip_seed{seed}.pt",
+    )
+    roots = candidate_config_roots(settings)
+    for root in roots:
+        for checkpoint_name in checkpoint_names:
+            candidate = root / checkpoint_name
+            if candidate.exists():
+                return str(candidate)
+
+    if roots:
+        return str(roots[0] / checkpoint_names[0])
+    return checkpoint_names[0]
+
+
+def checkpoint_seed_from_path(checkpoint_path: str) -> str | None:
+    match = CHECKPOINT_SEED_PATTERN.search(Path(checkpoint_path).name)
+    if not match:
+        return None
+    return match.group("seed")
+
+
+def build_runtime_settings(base_settings: Settings, seed: str, alpha: str) -> Settings:
+    namespace = format_seed_namespace(seed, alpha)
+    checkpoint = resolve_clip_checkpoint(base_settings, namespace)
+    return replace(
+        base_settings,
+        pinecone_namespace=namespace,
+        finetuned_seed=seed,
+        finetuned_alpha=alpha,
+        clip_checkpoint=checkpoint,
+    )
+
+
+def runtime_config_warnings(settings: Settings) -> list[str]:
+    warnings: list[str] = []
+    namespace_bits = parse_seed_namespace(settings.pinecone_namespace)
+    if namespace_bits:
+        if not settings.clip_checkpoint:
+            warnings.append(
+                "This seed-specific namespace needs the matching fine-tuned CLIP checkpoint. "
+                "Set CLIP_CHECKPOINT or keep the expected file next to your dataset."
+            )
+        elif not Path(settings.clip_checkpoint).expanduser().exists():
+            warnings.append(f"Expected CLIP checkpoint not found: {settings.clip_checkpoint}")
+        checkpoint_seed = checkpoint_seed_from_path(settings.clip_checkpoint)
+        if checkpoint_seed and checkpoint_seed != namespace_bits["seed"]:
+            warnings.append(
+                "Namespace seed and checkpoint seed do not match. "
+                "Pick the same seed for Pinecone and CLIP before searching."
+            )
+    elif not settings.clip_checkpoint:
+        warnings.append(
+            "CLIP_CHECKPOINT is empty, so query encoding will use the pretrained OpenAI CLIP weights."
+        )
+    return warnings
 
 
 def encode_query_image(image: Image.Image, settings: Settings) -> list[float]:
@@ -308,7 +458,7 @@ def request_blip2_rerank(
             headers=NGROK_HEADERS,
             timeout=settings.timeout_seconds,
         )
-        response.raise_for_status()
+        raise_for_status_with_detail(response)
         by_id = {str(row["id"]): row for row in response.json().get("results", [])}
     except Exception as exc:  # noqa: BLE001 - this keeps the demo alive during viva.
         return candidates, f"Remote BLIP-2 re-rank failed: {exc}. Showing CLIP/Pinecone ranking only."
@@ -351,13 +501,16 @@ def blip2_health(settings: Settings) -> tuple[bool, str]:
             headers=NGROK_HEADERS,
             timeout=settings.health_timeout_seconds,
         )
-        response.raise_for_status()
+        raise_for_status_with_detail(response)
         payload = response.json()
     except Exception as exc:  # noqa: BLE001 - surfaced in the sidebar.
         return False, str(exc)
 
     model_name = payload.get("model_id") or payload.get("model_name") or "BLIP-2"
-    return True, f"{model_name} warmed and ready."
+    backend = payload.get("backend")
+    score_mode = payload.get("final_score_mode")
+    details = ", ".join(str(value) for value in (backend, score_mode) if value)
+    return True, f"{model_name} warmed and ready" + (f" ({details})." if details else ".")
 
 
 def local_image_path(image_name: str, image_root: str) -> Path | None:
@@ -394,27 +547,62 @@ def render_candidate(row: dict[str, Any], rank: int, settings: Settings) -> None
             metric_cols[2].metric("Final", f"{row.get('final_score', row.get('clip_score', 0.0)):.4f}")
 
 
-def sidebar(settings: Settings) -> int:
+def sidebar(base_settings: Settings) -> tuple[int, Settings]:
     with st.sidebar:
         st.header("Runtime")
         top_k = st.slider("Results", 5, 30, 10, step=5)
-        st.text_input("BLIP-2 server", value=settings.blip2_server_url or "not set", disabled=True)
-        st.text_input("Pinecone index", value=settings.pinecone_index_name, disabled=True)
-        st.text_input("Namespace", value=settings.pinecone_namespace, disabled=True)
+
+        namespace_bits = parse_seed_namespace(base_settings.pinecone_namespace)
+        if base_settings.pinecone_namespace and namespace_bits is None:
+            runtime_settings = replace(
+                base_settings,
+                clip_checkpoint=resolve_clip_checkpoint(base_settings, base_settings.pinecone_namespace),
+            )
+            st.caption("Using custom `PINECONE_NAMESPACE` from environment.")
+        else:
+            default_seed = normalize_seed(
+                namespace_bits["seed"] if namespace_bits else base_settings.finetuned_seed
+            )
+            default_alpha = normalize_alpha(
+                namespace_bits["alpha"] if namespace_bits else base_settings.finetuned_alpha
+            )
+            seed = st.selectbox(
+                "Fine-tuned seed",
+                options=list(SUPPORTED_FINETUNED_SEEDS),
+                index=SUPPORTED_FINETUNED_SEEDS.index(default_seed),
+            )
+            alpha = st.selectbox(
+                "Namespace alpha",
+                options=list(SUPPORTED_FINETUNED_ALPHAS),
+                index=SUPPORTED_FINETUNED_ALPHAS.index(default_alpha),
+            )
+            runtime_settings = build_runtime_settings(base_settings, seed, alpha)
+
+        st.text_input("BLIP-2 server", value=runtime_settings.blip2_server_url or "not set", disabled=True)
+        st.text_input("Pinecone index", value=runtime_settings.pinecone_index_name, disabled=True)
+        st.text_input("Namespace", value=runtime_settings.pinecone_namespace or "not set", disabled=True)
+        st.text_input(
+            "CLIP checkpoint",
+            value=runtime_settings.clip_checkpoint or "pretrained OpenAI CLIP",
+            disabled=True,
+        )
+        for warning in runtime_config_warnings(runtime_settings):
+            st.warning(warning)
+        st.caption("BLIP-2 re-ranking stays the same across seeds; the namespace and CLIP checkpoint change together here.")
         if st.button("Check BLIP-2 server"):
-            ok, message = blip2_health(settings)
+            ok, message = blip2_health(runtime_settings)
             if ok:
                 st.success(message)
             else:
                 st.error(message)
         st.caption("Local config is read from .env or environment variables.")
-    return top_k
+    return top_k, runtime_settings
 
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    settings = load_settings()
-    top_k = sidebar(settings)
+    base_settings = load_settings()
+    top_k, settings = sidebar(base_settings)
 
     st.title(APP_TITLE)
     st.write("Upload a fashion product image, confirm the detected crop, then retrieve visually and semantically similar catalog items.")
@@ -431,21 +619,31 @@ def main() -> None:
         st.session_state.confirmed_crop = False
         st.session_state.manual_crop = False
 
-    yolo_crop, crop_note = crop_with_yolo(image, settings.yolo_model_path)
+    yolo_box, crop_note = crop_with_yolo(image, settings.yolo_model_path)
     st.session_state.setdefault("confirmed_crop", False)
-    st.session_state.setdefault("manual_crop", False)
+    st.session_state.setdefault("manual_crop", True)
 
     st.session_state.manual_crop = st.checkbox("Adjust crop manually", value=st.session_state.manual_crop)
-    crop = manual_crop_controls(image) if st.session_state.manual_crop else yolo_crop
-
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Original")
-        st.image(image, use_container_width=True)
-    with right:
-        st.subheader("Product crop")
+    
+    st.subheader("Product crop")
+    if st.session_state.manual_crop:
+        st.write("Adjust the bounding box below to refine the product crop.")
+        # Try to use YOLO default coordinates if available
+        crop = st_cropper(
+            image, 
+            realtime_update=True, 
+            box_color='#00FF00',
+            aspect_ratio=None,
+            default_coords=yolo_box if yolo_box else None
+        )
+    else:
+        if yolo_box:
+            # yolo_box is (left, right, top, bottom)
+            crop = image.crop((yolo_box[0], yolo_box[2], yolo_box[1], yolo_box[3]))
+        else:
+            crop = center_crop(image)
         st.image(crop, use_container_width=True)
-        st.caption(crop_note)
+    st.caption(crop_note)
 
     actions = st.columns([1, 1, 4])
     if actions[0].button("Confirm crop", type="primary"):
